@@ -91,11 +91,15 @@ def _parse_aspect(aspect_str):
 ### Импорт app
 
 ```javascript
-const app = window.comfyAPI?.app ?? window.app ?? {};
+const { app } = window.comfyAPI?.app;
 ```
 
-- Фолбэк на `window.app ?? {}` — не падает, если `window.comfyAPI` недоступен
-- `?? {}` гарантирует, что `app.registerExtension` не бросит `TypeError` при деконструкции `undefined`
+- ⚠️ `window.comfyAPI.app` — это **неймспейс**, а не инстанс. Настоящий инстанс лежит
+  в `window.comfyAPI.app.app`. Деструктуризация `const { app } = window.comfyAPI?.app;`
+  извлекает `.app` из неймспейса и даёт правильный инстанс.
+- **НЕЛЬЗЯ** заменять на `const app = window.comfyAPI?.app ?? ...` — так `app` станет
+  самим неймспейсом, у которого нет `registerExtension`, и extension упадёт на старте
+  (пропадут сепараторы и блокировка).
 
 ### 4.1. Визуальные сепараторы
 
@@ -156,6 +160,23 @@ nodeType.prototype.onConfigure = function () {
   return ret;
 };
 ```
+
+#### Re-apply через loadedGraphNode (гарантированный путь)
+
+`onConfigure` (LiteGraph) срабатывает на node-уровне, но самый надёжный хук — extension-хук
+`loadedGraphNode`, который фронтенд вызывает **для каждой ноды после** загрузки графа
+(вкладки / открытие воркфлоу), когда значения виджетов уже восстановлены:
+
+```javascript
+loadedGraphNode(node) {
+  if (node.comfyClass !== "DeggResSet") return;
+  const selectWidget = getWidget(node, "select");
+  if (selectWidget) updateWidgetState(node, selectWidget.value);
+}
+```
+
+Оба хука идемпотентны и могут срабатывать вместе — повторное применение одного и того же
+состояния безопасно.
 
 #### Важно: контекст callback
 

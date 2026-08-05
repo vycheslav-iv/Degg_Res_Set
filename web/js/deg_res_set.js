@@ -1,4 +1,4 @@
-const app = window.comfyAPI?.app ?? window.app ?? {};
+const { app } = window.comfyAPI?.app;
 
 // ── Separators ──
 
@@ -139,5 +139,13 @@ app.registerExtension({
       if (selectWidget) updateWidgetState(this, selectWidget.value);
       return ret;
     };
+  },
+
+  // Runs after a saved graph is loaded (tab switch / open workflow),
+  // when widget values are already restored.
+  loadedGraphNode(node) {
+    if (node.comfyClass !== "DeggResSet") return;
+    const selectWidget = getWidget(node, "select");
+    if (selectWidget) updateWidgetState(node, selectWidget.value);
   },
 });
