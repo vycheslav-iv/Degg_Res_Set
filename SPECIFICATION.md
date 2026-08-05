@@ -61,10 +61,13 @@ w = int(sqrt(total_pixels * ratio_w / ratio_h))   # базовая ширина
 h = int(sqrt(total_pixels * ratio_h / ratio_w))   # базовая высота
 w = (w // multiple) * multiple                     # выравнивание по кратности
 h = (h // multiple) * multiple
+w = max(w, multiple)                               # кламп — исключает вырождение в 0
+h = max(h, multiple)
 ```
 
 - Множитель `1_048_576` = 1024² (стандарт: 1.0 MP = 1024×1024 для квадрата)
 - Результат всегда кратен `multiple` (по умолчанию 8)
+- Кламп `max(x, multiple)` гарантирует ненулевой размер, если расчёт дал размер меньше `multiple`
 
 #### Presets 2-4 (select = 2, 3, 4) — Ручной ввод
 
@@ -88,8 +91,11 @@ def _parse_aspect(aspect_str):
 ### Импорт app
 
 ```javascript
-const { app } = window.comfyAPI?.app;
+const app = window.comfyAPI?.app ?? window.app ?? {};
 ```
+
+- Фолбэк на `window.app ?? {}` — не падает, если `window.comfyAPI` недоступен
+- `?? {}` гарантирует, что `app.registerExtension` не бросит `TypeError` при деконструкции `undefined`
 
 ### 4.1. Визуальные сепараторы
 
@@ -121,8 +127,35 @@ const { app } = window.comfyAPI?.app;
 #### Функции
 
 - `getWidget(node, name)` — поиск виджета по имени
-- `setWidgetDisabled(w, disabled)` — установка disabled через try/catch (совместимость с ComfyUI v0.27+ read-only getter)
+- `setWidgetDisabled(w, disabled)` — установка disabled:
+  ```javascript
+  function setWidgetDisabled(w, disabled) {
+    if (!w) return;
+    if (w.options) w.options.disabled = disabled; // ComboWidget: disabled живёт в options
+    try { w.disabled = disabled; } catch (_) {}   // fallback для старых версий
+  }
+  ```
+  Для `ComboWidget` (в т.ч. `aspect_ratio`) в ComfyUI v0.27+ `disabled` **read-only** и читается из `w.options.disabled`, поэтому обязателен обход через `options`.
 - `updateWidgetState(node, selectVal)` — дизейбл/активация всех виджетов по значению select
+
+#### Re-apply после десериализации (onConfigure)
+
+Блокировка задаётся через `select.callback`, который срабатывает **только при ручном изменении**.
+При переключении вкладок воркфлоу / загрузке JSON нода десериализуется: LiteGraph вызывает
+`configure()`, восстанавливает значения виджетов напрямую (через `.value`, минуя callback)
+и сбрасывает `disabled` у всех виджетов в `false`. Поэтому блокировка слетала.
+
+Решение — хук `onConfigure`, пере-применяющий состояние по актуальному `select` после каждого config:
+
+```javascript
+const origOnConfigure = nodeType.prototype.onConfigure;
+nodeType.prototype.onConfigure = function () {
+  const ret = origOnConfigure?.apply(this, arguments);
+  const selectWidget = getWidget(this, "select");
+  if (selectWidget) updateWidgetState(this, selectWidget.value);
+  return ret;
+};
+```
 
 #### Важно: контекст callback
 

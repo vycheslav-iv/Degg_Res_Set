@@ -1,4 +1,4 @@
-const { app } = window.comfyAPI?.app;
+const app = window.comfyAPI?.app ?? window.app ?? {};
 
 // ── Separators ──
 
@@ -56,11 +56,10 @@ function getWidget(node, name) {
 /** Enable or disable a widget (ComfyUI-safe, handles v0.27+ readonly getter) */
 function setWidgetDisabled(w, disabled) {
   if (!w) return;
+  if (w.options) w.options.disabled = disabled; // ComboWidget: disabled читается из options
   try {
-    w.disabled = disabled;
-  } catch (_) {
-    // ComfyUI >= 0.27 may throw if .disabled is a read-only getter
-  }
+    w.disabled = disabled; // fallback для старых версий
+  } catch (_) {}
 }
 
 /** Update widget enabled/disabled state based on select value */
@@ -126,6 +125,18 @@ app.registerExtension({
         updateWidgetState(node, selectWidget.value);
       }
 
+      return ret;
+    };
+
+    // ── Re-apply disabled state after deserialization ──
+    // When switching tabs (or loading a workflow) LiteGraph re-runs `configure`
+    // which resets widgets to disabled=false without firing the callback, so the
+    // correct preset lock is lost. Here we re-apply it based on the current select.
+    const origOnConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function () {
+      const ret = origOnConfigure?.apply(this, arguments);
+      const selectWidget = getWidget(this, "select");
+      if (selectWidget) updateWidgetState(this, selectWidget.value);
       return ret;
     };
   },

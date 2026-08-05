@@ -56,6 +56,8 @@ class DeggResSet:
             h = int(math.sqrt(total_pixels * ratio_h / ratio_w))
             w = (w // multiple) * multiple
             h = (h // multiple) * multiple
+            w = max(w, multiple)
+            h = max(h, multiple)
             return (w, h)
         elif select == 2:
             return (w1, h1)
