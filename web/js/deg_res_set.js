@@ -1,49 +1,38 @@
 const { app } = window.comfyAPI?.app;
 
-// ── Separators ──
+// ── Separators (DOM-based for Nodes 2.0 stability) ──
 
 const SEP_LABELS = [
-  "\u2550\u2550\u2550 ASPECT RATIO (Preset 1) \u2550\u2550\u2550",
-  "\u2550\u2550\u2550 PRESET 2 \u2550\u2550\u2550",
-  "\u2550\u2550\u2550 PRESET 3 \u2550\u2550\u2550",
-  "\u2550\u2550\u2550 PRESET 4 \u2550\u2550\u2550",
+  "═══ ASPECT RATIO (Preset 1) ═══",
+  "═══ PRESET 2 ═══",
+  "═══ PRESET 3 ═══",
+  "═══ PRESET 4 ═══",
 ];
 
 // Original (pre-insertion) indices for each separator
 const GROUP_START = [1, 4, 6, 8];
 
-const SEP_H = 24;
-
-function makeSep(label, groupIdx) {
-  return {
-    name: "__grp",
-    label: label,
-    groupIdx: groupIdx,
-    value: null,
-    disabled: true,
-    options: { serialize: false },
-    type: "separator",
-    computeSize(width) { return [width || 300, SEP_H]; },
-    draw(ctx, node, width, y, h) {
-      const w = width || node.size[0];
-      ctx.save();
-      ctx.fillStyle = "rgba(50,50,50,0.04)";
-      ctx.fillRect(0, y, w, SEP_H);
-      ctx.strokeStyle = "rgba(120,120,120,0.15)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(6, y + 1);
-      ctx.lineTo(w - 6, y + 1);
-      ctx.stroke();
-      ctx.fillStyle = "#888";
-      ctx.font = "bold 10px sans-serif";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "middle";
-      ctx.fillText(this.label, 10, y + SEP_H / 2 + 2);
-      ctx.restore();
-    },
-    onMouseDown() { return false; },
-  };
+function makeSepDOM(label) {
+  const el = document.createElement("div");
+  el.className = "degg-res-sep";
+  el.style.cssText = [
+    "box-sizing:border-box",
+    "height:22px",
+    "display:flex",
+    "align-items:center",
+    "padding:0 8px",
+    "margin:2px 0",
+    "border-top:1px solid rgba(120,120,120,0.25)",
+    "background:rgba(50,50,50,0.04)",
+    "color:#888",
+    "font:bold 10px sans-serif",
+    "white-space:nowrap",
+    "overflow:hidden",
+    "text-overflow:ellipsis",
+    "pointer-events:none",
+  ].join(";");
+  el.textContent = label;
+  return el;
 }
 
 // ── Widget helpers ──
@@ -101,15 +90,25 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function () {
       const ret = origOnNodeCreated?.apply(this, arguments);
 
-      // Insert separators (in reverse order to preserve indices)
+      // Insert DOM separators (in reverse order to preserve indices)
       for (let i = GROUP_START.length - 1; i >= 0; i--) {
         const idx = GROUP_START[i];
         if (idx < 0 || idx > this.widgets.length) continue;
-        this.widgets.splice(idx, 0, makeSep(SEP_LABELS[i], i));
+        const sepEl = makeSepDOM(SEP_LABELS[i]);
+        this.addDOMWidget(`__grp_${i}`, "div", sepEl, {
+          serialize: false,
+          hideInPanel: true,
+          getValue: () => null,
+          setValue: () => {},
+        });
+        // Move the DOM widget to the correct position
+        const sepWidget = this.widgets[this.widgets.length - 1];
+        this.widgets.splice(this.widgets.length - 1, 1);
+        this.widgets.splice(idx, 0, sepWidget);
       }
 
-      // Adjust node height for extra separators
-      this.setSize([this.size[0], this.size[1] + SEP_H * GROUP_START.length + 16]);
+      // Adjust node height for extra separators (22px each + margins)
+      this.setSize([this.size[0], this.size[1] + 26 * GROUP_START.length + 16]);
 
       // ── Hook up select widget callback for enable/disable ──
       const node = this;
