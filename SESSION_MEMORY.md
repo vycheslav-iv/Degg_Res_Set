@@ -1,4 +1,4 @@
-# Память сессии — Custom_node_ComfyUI (2026-08-05)
+# Память сессии — Degg_Res_Set (2026-10-19)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -6,46 +6,65 @@
 ---
 
 ## 1. Что делали в этой сессии (кратко)
-Работали с нодой **Degg_Res_Set**. Чинили баг: после переключения вкладок воркфлоу
-слетала блокировка виджетов неактивных пресетов. Допустили регресс (сломанный импорт app
-убивал весь extension), но нашли и полностью восстановили рабочее состояние. Изменения
-закоммичены и запушены в `1fb1d48`.
+Доделали строку-превью ResolutionPreview под `multiple`. Живой баг «строка не
+рисуется» найден в исходниках фронтенда и исправлен (канонический тип
+`'resolutionpreview'` вместо `"RESOLUTION_PREVIEW"`), пользователь подтвердил:
+**«Работает»**. SPEC обновлён, два скила переписаны/исправлены (по явному
+разрешению), код закоммичен `a08fd03`.
 
 ## 2. Итоговое состояние кода
-- `Degg_Res_Set/deg_res_set.py:52-67` — `process`: 4 пресета. Preset 1 считает из aspect+MP+кратность, кламп `max(w/h, multiple)` на строках 59-60.
-- `Degg_Res_Set/web/js/deg_res_set.js:1` — **критично**: `const { app } = window.comfyAPI?.app;` (иначе extension падает).
-- `Degg_Res_Set/web/js/deg_res_set.js:57-64` — `setWidgetDisabled`: `w.options.disabled` + fallback `w.disabled`.
-- `Degg_Res_Set/web/js/deg_res_set.js:135-141` — `onConfigure`-хук, пере-применение блокировки.
-- `Degg_Res_Set/web/js/deg_res_set.js:146-150` — **`loadedGraphNode`**-хук (гарантированный re-apply после загрузки графа/вкладок).
+- `web/js/deg_res_set.js:1` — **критично**: `const { app } = window.comfyAPI?.app;`.
+- `web/js/deg_res_set.js:5`-`13` — `SEP_LABELS` ×4, `GROUP_START=[1,4,6,8]`,
+  `makeSepDOM` — DOM-сепараторы (вставка циклом с конца).
+- `web/js/deg_res_set.js:55` — `updateWidgetState(node, selectVal)`: гасит
+  неактивные пресеты (`w.options.disabled`), переключает
+  `prev.options.ratio_widget` на `__preset_off__` при `select≠1` (→ `—`).
+- `web/js/deg_res_set.js:126` — `addWidget("resolutionpreview", "preview",
+  null, () => {}, {serialize:false, hideInPanel:true, canvasOnly:false,
+  ratio_widget:..., megapixels_widget:..., multiple_widget:...})`,
+  `previewWidget.serialize=false`, splice под `multiple`, бамп высоты.
+- `web/js/deg_res_set.js:~165-188` — три точки re-apply блокировки:
+  `select.callback`, `onConfigure`, `loadedGraphNode`.
+- `deg_res_set.py:51-59` — `process`: preset 1 round-паритет
+  (`round(scale*ratio/multiple)*multiple`), 2-4 passthrough.
+- `tests/_test_preview.py` — детектор канонического типа + serialize×2 +
+  позиция + switch + round `(1928,1088)`/`(1776,1184)` + guard.
+- `tests/_test_dom_sep.py` — регрессия сепараторов.
 
 ## 3. Проблемы, которые встречались (и как решали)
-- **Основной баг**: блокировка задавалась только через `select.callback`, который НЕ
-   вызывается при десериализации (LiteGraph `configure()` ставит `.value` напрямую, сбрасывая
-   `disabled`). Решение — `onConfigure` + `loadedGraphNode`, оба заново применяют
-   `updateWidgetState` по актуальному `select`.
-- **⚠️ РЕГРЕСС, который сломал ноду**: замена импорта на `const app = window.comfyAPI?.app ?? window.app ?? {}`
-   возвращала **неймспейс** (а не инстанс), у которого нет `registerExtension` → extension падал,
-   пропадали сепараторы и блокировка. Урок: `window.comfyAPI.app` — неймспейс,
-   инстанс = `window.comfyAPI.app.app`. ВАЖНО: `const { app } = window.comfyAPI?.app;` — ЕДИНСТВЕННО правильный импорт.
-- **`setWidgetDisabled`**: для ComboWidget (`aspect_ratio`) в v0.27+ `disabled` read-only, читается из `w.options.disabled`.
+- **Живой баг 19.10: пустое место вместо строки, ошибок нет.** Причина:
+  `LGraphNode.addWidget` сохраняет `type.toLowerCase()`
+  (`LGraphNode.ts:2248`), реестр `widgetRegistry.ts` ищет case-sensitive:
+  базовый ключ `'resolutionpreview'`, алиас `'RESOLUTION_PREVIEW'` заглавными.
+  Литерал `"RESOLUTION_PREVIEW"` → `'resolution_preview'` (лишнее
+  подчёркивание) → `getComponent(widget.type)` (`WidgetItem.vue:71`) → `null`
+  → ряд не монтируется. Лечение: тип `"resolutionpreview"` + `canvasOnly:false`
+  (зеркало фабрики; сам `canvasOnly` эквивалентен отсутствию —
+  `BaseWidget.ts:192` читает `value === true`).
+- Приёмка: красный `FAIL: 1` до правки → зелёный → мутация тип→uppercase
+  `FAIL: 1` → восстановлено. `check.py` — ЗЕЛЁНОЕ (warn = git-предохранитель,
+  не поставлен — known).
 
 ## 4. Что важно не сломать при продолжении работы
-- **НИКОГДА не менять строку импорта** `const { app } = window.comfyAPI?.app;` (см. урок выше).
-- Блокировка держится на трёх точках: callback (смена select вручную) + `onConfigure` + `loadedGraphNode`.
-  Не удалять `loadedGraphNode` при правках.
-- Позиции сепараторов `GROUP_START=[1,4,6,8]` = порядок `INPUT_TYPES`
-  (`select, aspect_ratio, megapixels, multiple, w1, h1, w2, h2, w3, h3`). Вставка в обратном порядке.
-- `onNodeCreated` при переключении вкладок вызывается заново (нода создаётся свежей),
-   сепараторы не дублируются.
-- Правки только в исходник `F:\AI_projects\Custom_node_ComfyUI\Degg_Res_Set\`,
-   затем `python sync.py Degg_Res_Set` в рабочую копию.
+- **НИКОГДА не менять импорт** `const { app } = window.comfyAPI?.app;`.
+- **Тип превью только `'resolutionpreview'`** (без подчёркивания) — иначе
+  молчаливая пустота. Не писать `"RESOLUTION_PREVIEW"`.
+- Не добавлять `preview` в `INPUT_TYPES` (required-missing = ошибка сервера).
+- Serialize превью в ОБА канала (`options.serialize:false` + raw-строка).
+- Три точки re-apply блокировки (callback/onConfigure/loadedGraphNode) не удалять.
+- `GROUP_START=[1,4,6,8]` — порядок `INPUT_TYPES` (select, aspect_ratio,
+  megapixels, multiple, w1..h3); вставка сепараторов с конца.
+- Python preset 1 — только `round()`, не `floor()` (паритет с фронтендом).
+- Правки в исходник `F:\...\Degg_Res_Set\` → `check.py` → `sync.py` → рестарт + Ctrl+F5.
 
 ## 5. Следующие шаги (идеи, не сделано)
-- Проверить после перезапуска ComfyUI: переключение вкладок, блокировка пресетов, разделители.
+- Живо проверить `—` при `select≠1` и реактивность подмены `ratio_widget`
+  (допущение о store-реактивности не доказано — если не гаснет, фолбэк из
+  скила `comfyui-resolution-preview`).
+- Поставить git-предохранитель `_process/hooks/pre-commit` (warn в check.py).
+- Обновить `check.json` проекта (файла нет — check.py гоняет только синтаксис/тесты).
 
 ## 6. Связанные файлы
-- `F:\AI_projects\Custom_node_ComfyUI\Degg_Res_Set\deg_res_set.py`
-- `F:\AI_projects\Custom_node_ComfyUI\Degg_Res_Set\web\js\deg_res_set.js`
-- `F:\AI_projects\Custom_node_ComfyUI\Degg_Res_Set\__init__.py`
-- `F:\AI_projects\Custom_node_ComfyUI\Degg_Res_Set\SPECIFICATION.md`
-- Рабочая копия: `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Degg_Res_Set\`
+- `F:\AI_projects\Custom_node_ComfyUI\Degg_Res_Set\{deg_res_set.py, web\js\deg_res_set.js, SPECIFICATION.md, tests\_test_preview.py, tests\_test_dom_sep.py}`
+- Скилы (обновлены 19.10): `.opencode|.kilo|.agents\skills\comfyui-resolution-preview\SKILL.md` (исправлен баг-паттерн, ловушка типа), `...\comfyui-res-set\SKILL.md` (переписан под 4 пресета)
+- Рабочая копия: `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Degg_Res_Set\` (синк после фикса)
