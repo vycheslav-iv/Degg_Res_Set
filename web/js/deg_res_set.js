@@ -63,6 +63,14 @@ function updateWidgetState(node, selectVal) {
   const w3 = getWidget(node, "w3");
   const h3 = getWidget(node, "h3");
 
+  // Preview line: live "W × H  MP" only for preset 1 (it reads the
+  // aspect_ratio sibling); any other preset -> dead sibling name -> "—".
+  const prev = getWidget(node, "preview");
+  if (prev && prev.options) {
+    prev.options.ratio_widget =
+      selectVal === 1 ? "aspect_ratio" : "__preset_off__";
+  }
+
   // Disable all preset-specific widgets first
   [ar, mp, mult].forEach((w) => setWidgetDisabled(w, true));
   [w1, h1, w2, h2, w3, h3].forEach((w) => setWidgetDisabled(w, true));
@@ -107,8 +115,38 @@ app.registerExtension({
         this.widgets.splice(idx, 0, sepWidget);
       }
 
-      // Adjust node height for extra separators (22px each + margins)
-      this.setSize([this.size[0], this.size[1] + 26 * GROUP_START.length + 16]);
+      // ── ResolutionPreview: native Vue widget showing "W × H  MP" ──
+      // Same component as the standard ResolutionSelector node; computes the
+      // preset-1 size live from aspect_ratio/megapixels/multiple siblings.
+      // Type MUST be the canonical registry key 'resolutionpreview':
+      // addWidget stores type.toLowerCase(), and widgetRegistry resolves
+      // 'resolutionpreview' (alias 'RESOLUTION_PREVIEW' is case-sensitive) —
+      // "RESOLUTION_PREVIEW" lowercases to 'resolution_preview', resolves to
+      // nothing and the row renders blank.
+      const previewWidget = this.addWidget(
+        "resolutionpreview",
+        "preview",
+        null,
+        () => {},
+        {
+          serialize: false,
+          hideInPanel: true,
+          canvasOnly: false,
+          ratio_widget: "aspect_ratio",
+          megapixels_widget: "megapixels",
+          multiple_widget: "multiple",
+        }
+      );
+      previewWidget.serialize = false;
+      // Move directly below the `multiple` widget (separators already placed)
+      const multIdx = this.widgets.findIndex((w) => w.name === "multiple");
+      if (multIdx >= 0) {
+        this.widgets.splice(this.widgets.length - 1, 1);
+        this.widgets.splice(multIdx + 1, 0, previewWidget);
+      }
+
+      // Adjust node height for extra separators (22px each + margins) + preview row
+      this.setSize([this.size[0], this.size[1] + 26 * (GROUP_START.length + 1) + 16]);
 
       // ── Hook up select widget callback for enable/disable ──
       const node = this;

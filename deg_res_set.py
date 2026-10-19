@@ -52,12 +52,11 @@ class DeggResSet:
         if select == 1:
             ratio_w, ratio_h = self._parse_aspect(aspect_ratio)
             total_pixels = megapixels * 1_048_576
-            w = int(math.sqrt(total_pixels * ratio_w / ratio_h))
-            h = int(math.sqrt(total_pixels * ratio_h / ratio_w))
-            w = (w // multiple) * multiple
-            h = (h // multiple) * multiple
-            w = max(w, multiple)
-            h = max(h, multiple)
+            # Same formula as comfy_extras/nodes_resolution.py (ResolutionSelector):
+            # round() ties to even, matching the frontend ResolutionPreview widget.
+            scale = math.sqrt(total_pixels / (ratio_w * ratio_h))
+            w = round(scale * ratio_w / multiple) * multiple
+            h = round(scale * ratio_h / multiple) * multiple
             return (w, h)
         elif select == 2:
             return (w1, h1)

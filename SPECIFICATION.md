@@ -12,8 +12,10 @@
 | Файл | Назначение |
 |------|-----------|
 | `deg_res_set.py` | Python-класс `DeggResSet` — 4 пресета, расчёт ResolutionSelector |
-| `web/js/deg_res_set.js` | LiteGraph-расширение: 4 визуальных сепаратора, дизейбл/активация виджетов |
+| `web/js/deg_res_set.js` | LiteGraph-расширение: 4 визуальных сепаратора, дизейбл/активация виджетов, строка превью ResolutionPreview |
 | `__init__.py` | Экспорт маппингов, `WEB_DIRECTORY` |
+| `tests/_test_preview.py` | Тест превью-строки (канонический тип, serialize×2, позиция, switch, round-паритет) |
+| `tests/_test_dom_sep.py` | Регрессия DOM-сепараторов |
 
 ## 3. Python: класс DeggResSet
 
@@ -57,17 +59,18 @@
 ```python
 ratio_w, ratio_h = _parse_aspect(aspect_ratio)   # "16:9 (Widescreen)" → (16, 9)
 total_pixels = megapixels * 1_048_576             # 1.0 MP → 1_048_576 px
-w = int(sqrt(total_pixels * ratio_w / ratio_h))   # базовая ширина
-h = int(sqrt(total_pixels * ratio_h / ratio_w))   # базовая высота
-w = (w // multiple) * multiple                     # выравнивание по кратности
-h = (h // multiple) * multiple
-w = max(w, multiple)                               # кламп — исключает вырождение в 0
-h = max(h, multiple)
+scale = sqrt(total_pixels / (ratio_w * ratio_h))  # масштаб на единицу соотношения
+w = round(scale * ratio_w / multiple) * multiple  # round() — ties to even
+h = round(scale * ratio_h / multiple) * multiple
 ```
 
 - Множитель `1_048_576` = 1024² (стандарт: 1.0 MP = 1024×1024 для квадрата)
-- Результат всегда кратен `multiple` (по умолчанию 8)
-- Кламп `max(x, multiple)` гарантирует ненулевой размер, если расчёт дал размер меньше `multiple`
+- Формула идентична `comfy_extras/nodes_resolution.py` (ResolutionSelector) и
+  фронтенд-виджету `WidgetResolutionPreview` (`roundHalfToEven`) — строка превью
+  всегда совпадает с фактическими выходами
+- `round()` — банковское округление (ties to even), как у Python в стандарте
+- Результат всегда кратен `multiple` (по умолчанию 8); кламп `max(x, multiple)` убран:
+  при min `megapixels = 0.1` округление до 0 невозможно
 
 #### Presets 2-4 (select = 2, 3, 4) — Ручной ввод
 
@@ -122,7 +125,7 @@ const { app } = window.comfyAPI?.app;
 - `GROUP_START = [1, 4, 6, 8]` — исходные индексы вставки (до смещения)
 - Вставка в обратном порядке (с конца) для сохранения позиций
 - Высота сепаратора: 22px + 2px margin = 26px
-- Автоматическое увеличение высоты ноды: `+26 * 4 + 16 = 120px`
+- Автоматическое увеличение высоты ноды: `+26 * (4 + 1) + 16 = 146px` (4 сепаратора + строка превью)
 - `makeSepDOM(label)` создаёт `div` с CSS:
   - `height: 22px`, `border-top`, `background: rgba(50,50,50,0.04)`
   - `color: #888`, `font: bold 10px sans-serif`
@@ -202,6 +205,59 @@ selectWidget.callback = function (val) {
     ...
 };
 ```
+
+### 4.3. Строка превью ResolutionPreview
+
+Под виджетом `multiple` живёт строка `1928 × 1088  2.00 МП` — штатный Vue-виджет
+`WidgetResolutionPreview`, создаваемый с каноническим ключом реестра
+`resolutionpreview` (тот же компонент, что в обновлённом стандартном
+`ResolutionSelector`).
+
+> ⛔ **Тип — это канонический ключ, а не имя из схемы.** `LGraphNode.addWidget`
+> сохраняет `type.toLowerCase()` (`LGraphNode.ts`), реестр `widgetRegistry.ts`
+> ищет в case-sensitive `Map`: базовый ключ `'resolutionpreview'`, алиас
+> `'RESOLUTION_PREVIEW'`. Литерал `"RESOLUTION_PREVIEW"` превращается в
+> `'resolution_preview'` (лишнее подчёркивание) → `getComponent(widget.type)`
+> → `null` → **ряд рендерится пустым без единой ошибки в консоли** (живой баг
+> 19.10.2026). Детектор: `tests/_test_preview.py` (мутация тип→uppercase = FAIL: 1).
+
+#### Создание и позиционирование (onNodeCreated, после сепараторов)
+
+```javascript
+const previewWidget = this.addWidget(
+  "resolutionpreview", "preview", null, () => {},
+  {
+    serialize: false,          // не попадает в prompt
+    hideInPanel: true,         // не рендерится в панели свойств
+    canvasOnly: false,         // зеркало фабрики (эквивалентно отсутствию:
+                               // BaseWidget читает `value === true`)
+    ratio_widget: "aspect_ratio",
+    megapixels_widget: "megapixels",
+    multiple_widget: "multiple",
+  }
+);
+previewWidget.serialize = false;   // не сохраняется в widgets_values
+const multIdx = this.widgets.findIndex((w) => w.name === "multiple");
+if (multIdx >= 0) {
+  this.widgets.splice(this.widgets.length - 1, 1);
+  this.widgets.splice(multIdx + 1, 0, previewWidget);
+}
+```
+
+#### Ключевые свойства
+
+- **Сервер не участвует:** входа `preview` в `INPUT_TYPES` нет, prompt его не
+  содержит — никаких последствий для валидации/выполнения.
+- **Не сериализуется** дважды (`options.serialize=false` и `widget.serialize=false`) —
+  старые воркфлоу и восстановление `widgets_values` не затрагиваются.
+- **Математика компонента:** `roundHalfToEven` (паритет с Python `round()`), формула
+  идентична `nodes_resolution.py` — строка не врёт про выходы.
+- **Честность при `select≠1`:** `updateWidgetState` переключает
+  `preview.options.ratio_widget` на несуществующий `__preset_off__` → компонент не
+  находит ratio → показывает `—`; при `select == 1` возвращается `aspect_ratio`.
+  Переключение живёт в единственной точке (`updateWidgetState`), которую вызывают
+  callback select + `onConfigure` + `loadedGraphNode`.
+- **Высота ноды:** строка учитывается в `+26 * (GROUP_START.length + 1) + 16`.
 
 ## 5. Категория
 
