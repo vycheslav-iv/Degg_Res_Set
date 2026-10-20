@@ -11,6 +11,11 @@ via case-sensitive aliasMap/widgets lookups ('resolutionpreview' key,
 alias 'RESOLUTION_PREVIEW'). A literal "RESOLUTION_PREVIEW" becomes
 'resolution_preview' after toLowerCase, matches neither, getComponent returns
 null and the row renders blank — this was the live "no line" bug.
+
+Checks 7-12 pin the mount-race fix: the row is built by an idempotent
+createPreview(node) on the NEXT tick (a node has no id and is outside the graph
+during onNodeCreated, and the Vue preview resolves its host once and
+non-reactively -> "—" forever after a workflow reload).
 """
 import importlib.util
 import re
@@ -18,6 +23,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+try:  # messages contain '—' / '×'; cp1251 console would mangle them
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 JS = ROOT / "web" / "js" / "deg_res_set.js"
 PY = ROOT / "deg_res_set.py"
 
@@ -92,6 +102,84 @@ def main():
     got2 = node.process(2, "1:1 (Square)", 2.0, 8, 640, 360, 768, 768, 1024, 1024)
     if got2 != (640, 360):
         fails.append(f"select=2 -> {got2}, expected (640, 360)")
+
+    # 7. Preview row is created on the NEXT tick, not inside onNodeCreated.
+    #    At onNodeCreated the node has no id and is not in a graph yet; the Vue
+    #    preview resolves its host node once, non-reactively
+    #    (computed(() => resolveNode(nodeId))), so a row mounted before the node
+    #    joins the graph caches "no host" and renders "—" forever.
+    if not re.search(r"function createPreview\(node\)\s*\{", src):
+        fails.append(
+            "createPreview(node) not found — preview creation must be a "
+            "separate, re-runnable step"
+        )
+    if not re.search(r"setTimeout\(\s*\(\s*\)\s*=>\s*createPreview\(node\)", src):
+        fails.append(
+            "preview not deferred (setTimeout -> createPreview) — row mounts "
+            "before the node is attached and shows '—'"
+        )
+    if re.search(
+        r"^\s*const previewWidget = this\.addWidget\(\s*[\"']resolutionpreview",
+        src,
+        re.M,
+    ):
+        fails.append(
+            "addWidget('resolutionpreview') still runs synchronously in "
+            "onNodeCreated — node has no id yet"
+        )
+
+    # 8. Idempotent: created once even if onConfigure/loadedGraphNode re-run
+    cp = re.search(r"function createPreview\(node\)\s*\{([\s\S]*?)\n\}", src)
+    if not cp:
+        fails.append("createPreview() body not found")
+    elif not re.search(r"if \(getWidget\(node, [\"']preview[\"']\)\) return;", cp.group(1)):
+        fails.append("createPreview() is not idempotent (no 'already exists' guard)")
+
+    # 9. Loaded graph also ensures the row (covers a dropped timer)
+    lg = re.search(r"loadedGraphNode\(node\)\s*\{([\s\S]*?)\n  \}", src)
+    if not lg:
+        fails.append("loadedGraphNode(node) not found")
+    elif "createPreview(node)" not in lg.group(1):
+        fails.append("loadedGraphNode does not call createPreview(node)")
+
+    # 10. Widget values may arrive as strings from workflow JSON — the preset
+    #     test must compare numbers (Number('1') === 1)
+    if not re.search(r"selectVal = Number\(selectVal\)", src):
+        fails.append(
+            "selectVal is not normalized with Number() — '1' would disable preset 1"
+        )
+
+    # 11. No synchronous createPreview() left in onNodeCreated: any call must
+    #     sit inside the deferred callback (same line as setTimeout).
+    onc = re.search(
+        r"prototype\.onNodeCreated = function \(\) \{([\s\S]*?)\n    \};", src
+    )
+    if not onc:
+        fails.append("onNodeCreated override not found")
+    else:
+        eager = [
+            ln
+            for ln in onc.group(1).splitlines()
+            if "createPreview(" in ln and "setTimeout" not in ln
+        ]
+        if eager:
+            fails.append(
+                "createPreview() called synchronously in onNodeCreated "
+                f"({len(eager)} line(s)) — node is not attached yet"
+            )
+
+    # 12. onConfigure must NOT create the row: it runs inside LGraph.configure,
+    #     i.e. before graph.add(node) — the exact window this bug comes from.
+    oc = re.search(
+        r"prototype\.onConfigure = function \(\) \{([\s\S]*?)\n    \};", src
+    )
+    if not oc:
+        fails.append("onConfigure override not found")
+    elif "createPreview(" in oc.group(1):
+        fails.append(
+            "createPreview() called from onConfigure — node is not attached yet "
+            "(same mount-race); use loadedGraphNode instead"
+        )
 
     if fails:
         print(f"FAIL: {len(fails)}")

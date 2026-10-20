@@ -53,6 +53,10 @@ function setWidgetDisabled(w, disabled) {
 
 /** Update widget enabled/disabled state based on select value */
 function updateWidgetState(node, selectVal) {
+  // Values can arrive from workflow JSON as strings ("1"): compare numbers,
+  // otherwise preset 1 would look inactive and the preview stays "—".
+  selectVal = Number(selectVal);
+
   const ar = getWidget(node, "aspect_ratio");
   const mp = getWidget(node, "megapixels");
   const mult = getWidget(node, "multiple");
@@ -87,6 +91,53 @@ function updateWidgetState(node, selectVal) {
   }
 }
 
+// ── ResolutionPreview: native Vue widget showing "W × H  MP" ──
+// Same component as the standard ResolutionSelector node; computes the
+// preset-1 size live from aspect_ratio/megapixels/multiple siblings.
+// Type MUST be the canonical registry key 'resolutionpreview':
+// addWidget stores type.toLowerCase(), and widgetRegistry resolves
+// 'resolutionpreview' (alias 'RESOLUTION_PREVIEW' is case-sensitive) —
+// "RESOLUTION_PREVIEW" lowercases to 'resolution_preview', resolves to
+// nothing and the row renders blank.
+//
+// ⛔ Created on the NEXT tick, never inside onNodeCreated: there the node has
+// no id and is not in a graph yet, and the Vue preview resolves its host node
+// ONCE and non-reactively (computed(() => resolveNode(nodeId))). A row mounted
+// before the node joins the graph caches "no host", so its sibling lookups
+// never run and it renders "—" forever (only a browser reload heals it).
+function createPreview(node) {
+  if (getWidget(node, "preview")) return; // already created
+
+  const selectWidget = getWidget(node, "select");
+  const selectVal = Number(selectWidget?.value);
+
+  const previewWidget = node.addWidget(
+    "resolutionpreview",
+    "preview",
+    null,
+    () => {},
+    {
+      serialize: false,
+      hideInPanel: true,
+      canvasOnly: false,
+      ratio_widget: selectVal === 1 ? "aspect_ratio" : "__preset_off__",
+      megapixels_widget: "megapixels",
+      multiple_widget: "multiple",
+    }
+  );
+  previewWidget.serialize = false;
+
+  // Move directly below the `multiple` widget (separators already placed)
+  const multIdx = node.widgets.findIndex((w) => w.name === "multiple");
+  if (multIdx >= 0) {
+    const at = node.widgets.indexOf(previewWidget);
+    if (at !== -1) node.widgets.splice(at, 1);
+    node.widgets.splice(multIdx + 1, 0, previewWidget);
+  }
+
+  updateWidgetState(node, selectVal);
+}
+
 // ── Extension ──
 
 app.registerExtension({
@@ -115,38 +166,14 @@ app.registerExtension({
         this.widgets.splice(idx, 0, sepWidget);
       }
 
-      // ── ResolutionPreview: native Vue widget showing "W × H  MP" ──
-      // Same component as the standard ResolutionSelector node; computes the
-      // preset-1 size live from aspect_ratio/megapixels/multiple siblings.
-      // Type MUST be the canonical registry key 'resolutionpreview':
-      // addWidget stores type.toLowerCase(), and widgetRegistry resolves
-      // 'resolutionpreview' (alias 'RESOLUTION_PREVIEW' is case-sensitive) —
-      // "RESOLUTION_PREVIEW" lowercases to 'resolution_preview', resolves to
-      // nothing and the row renders blank.
-      const previewWidget = this.addWidget(
-        "resolutionpreview",
-        "preview",
-        null,
-        () => {},
-        {
-          serialize: false,
-          hideInPanel: true,
-          canvasOnly: false,
-          ratio_widget: "aspect_ratio",
-          megapixels_widget: "megapixels",
-          multiple_widget: "multiple",
-        }
-      );
-      previewWidget.serialize = false;
-      // Move directly below the `multiple` widget (separators already placed)
-      const multIdx = this.widgets.findIndex((w) => w.name === "multiple");
-      if (multIdx >= 0) {
-        this.widgets.splice(this.widgets.length - 1, 1);
-        this.widgets.splice(multIdx + 1, 0, previewWidget);
-      }
-
       // Adjust node height for extra separators (22px each + margins) + preview row
       this.setSize([this.size[0], this.size[1] + 26 * (GROUP_START.length + 1) + 16]);
+
+      // ── ResolutionPreview row: deferred (see createPreview above) ──
+      // At this point the node is not attached yet, so the row must wait one
+      // tick. The creation is idempotent and also re-run from loadedGraphNode
+      // in case the timer is throttled away.
+      setTimeout(() => createPreview(node), 0);
 
       // ── Hook up select widget callback for enable/disable ──
       const node = this;
@@ -182,6 +209,9 @@ app.registerExtension({
   // when widget values are already restored.
   loadedGraphNode(node) {
     if (node.comfyClass !== "DeggResSet") return;
+    // Graph is fully attached here — safe place to (re)build the preview row
+    // if its deferred creation was throttled away.
+    createPreview(node);
     const selectWidget = getWidget(node, "select");
     if (selectWidget) updateWidgetState(node, selectWidget.value);
   },

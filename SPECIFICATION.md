@@ -14,7 +14,7 @@
 | `deg_res_set.py` | Python-класс `DeggResSet` — 4 пресета, расчёт ResolutionSelector |
 | `web/js/deg_res_set.js` | LiteGraph-расширение: 4 визуальных сепаратора, дизейбл/активация виджетов, строка превью ResolutionPreview |
 | `__init__.py` | Экспорт маппингов, `WEB_DIRECTORY` |
-| `tests/_test_preview.py` | Тест превью-строки (канонический тип, serialize×2, позиция, switch, round-паритет) |
+| `tests/_test_preview.py` | Тест превью-строки (канонический тип, serialize×2, позиция, switch, round-паритет, отложенное создание, идемпотентность, `Number(select)`) |
 | `tests/_test_dom_sep.py` | Регрессия DOM-сепараторов |
 
 ## 3. Python: класс DeggResSet
@@ -221,33 +221,74 @@ selectWidget.callback = function (val) {
 > → `null` → **ряд рендерится пустым без единой ошибки в консоли** (живой баг
 > 19.10.2026). Детектор: `tests/_test_preview.py` (мутация тип→uppercase = FAIL: 1).
 
-#### Создание и позиционирование (onNodeCreated, после сепараторов)
+#### ⛔ Создание — на следующем тике, не в `onNodeCreated`
+
+Ряд обязан создаваться **после подключения ноды к графу**. В `onNodeCreated`
+нода ещё без id (`UNASSIGNED_NODE_ID`) и вне графа: `createNode` зовёт конструктор
+→ `onNodeCreated()`, и только потом `graph.add(node)`, где `attachNodeToStores`
+регистрирует виджеты в `widgetValueStore` и будит Vue-рендер. Компонент превью
+резолвит хост **один раз и нереактивно** —
+`hostNode = computed(() => resolveNode(nodeId))`, а `resolveNode`
+(`utils/litegraphUtil.ts`) читает `app.rootGraph.getNodeById` без реактивных
+зависимостей. Ряд, смонтированный в этом окне, кэширует `hostNode = undefined`
+навсегда: sibling-значения не читаются, `resolution = null` → постоянный `—`.
+F5 лечит (новый инстанс компонента) — это отпечаток mount-race.
+
+Живой баг 19–20.10.2026: на только что созданной ноде строка считалась, после
+перезапуска ComfyUI / открытия сохранённого воркфлоу — `—` при живом пресете 1.
+
+Создание вынесено в идемпотентную `createPreview(node)`; вызовы:
 
 ```javascript
-const previewWidget = this.addWidget(
-  "resolutionpreview", "preview", null, () => {},
-  {
-    serialize: false,          // не попадает в prompt
-    hideInPanel: true,         // не рендерится в панели свойств
-    canvasOnly: false,         // зеркало фабрики (эквивалентно отсутствию:
-                               // BaseWidget читает `value === true`)
-    ratio_widget: "aspect_ratio",
-    megapixels_widget: "megapixels",
-    multiple_widget: "multiple",
+// onNodeCreated (после сепараторов):
+setTimeout(() => createPreview(node), 0);   // макротаска — после флаша Vue
+// loadedGraphNode: createPreview(node)      // граф уже собран (страховка от
+//                                           // троттлинга таймера)
+```
+
+`onConfigure` ряд НЕ создаёт: он выполняется внутри `LGraph.configure`, то есть
+до `graph.add(node)` — то же опасное окно.
+
+```javascript
+function createPreview(node) {
+  if (getWidget(node, "preview")) return;        // идемпотентно
+  const selectVal = Number(getWidget(node, "select")?.value);
+  const previewWidget = node.addWidget(
+    "resolutionpreview", "preview", null, () => {},
+    {
+      serialize: false,          // не попадает в prompt
+      hideInPanel: true,         // не рендерится в панели свойств
+      canvasOnly: false,         // зеркало фабрики (эквивалентно отсутствию:
+                                 // BaseWidget читает `value === true`)
+      ratio_widget: selectVal === 1 ? "aspect_ratio" : "__preset_off__",
+      megapixels_widget: "megapixels",
+      multiple_widget: "multiple",
+    }
+  );
+  previewWidget.serialize = false;   // не сохраняется в widgets_values
+  const multIdx = node.widgets.findIndex((w) => w.name === "multiple");
+  if (multIdx >= 0) {
+    const at = node.widgets.indexOf(previewWidget);
+    if (at !== -1) node.widgets.splice(at, 1);
+    node.widgets.splice(multIdx + 1, 0, previewWidget);
   }
-);
-previewWidget.serialize = false;   // не сохраняется в widgets_values
-const multIdx = this.widgets.findIndex((w) => w.name === "multiple");
-if (multIdx >= 0) {
-  this.widgets.splice(this.widgets.length - 1, 1);
-  this.widgets.splice(multIdx + 1, 0, previewWidget);
+  updateWidgetState(node, selectVal);
 }
 ```
+
+> ⚠️ Пере-создание ряда задним числом не помогает: `WidgetGrid.vue` ключует
+> строки по `renderKey = <widgetId>:<type>`, поэтому `removeWidget` + `addWidget`
+> с тем же именем/типом переиспользует инстанс Vue и кэш `hostNode` устаивает.
+> Родственный симптом — `WidgetDOM.vue` (сепараторы): он тоже ищет хост только в
+> `onMounted` и при отсутствии молча оставляет пустой `<div>`.
 
 #### Ключевые свойства
 
 - **Сервер не участвует:** входа `preview` в `INPUT_TYPES` нет, prompt его не
   содержит — никаких последствий для валидации/выполнения.
+- **Значения могут приходить строками** (`select: "1"` из JSON) — `updateWidgetState`
+  нормализует их через `Number()`, иначе `selectVal === 1` ложно и `ratio_widget`
+  навсегда уходит в `__preset_off__` (тот же `—`).
 - **Не сериализуется** дважды (`options.serialize=false` и `widget.serialize=false`) —
   старые воркфлоу и восстановление `widgets_values` не затрагиваются.
 - **Математика компонента:** `roundHalfToEven` (паритет с Python `round()`), формула
