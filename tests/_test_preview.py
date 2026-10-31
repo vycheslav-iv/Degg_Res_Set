@@ -90,16 +90,23 @@ def main():
             )
 
     # 5. Python math parity with standard ResolutionSelector (round, not floor)
+    #    process() now returns {"ui": {...}, "result": (w, h)} (see
+    #    tests/_test_process_ui.py) — the math is read from `result`.
+    def size(out):
+        if isinstance(out, dict) and isinstance(out.get("result"), tuple):
+            return out["result"]
+        return out
+
     node = load_node()
-    got16 = node.process(1, "16:9 (Widescreen)", 2.0, 8, 512, 512, 768, 768, 1024, 1024)
+    got16 = size(node.process(1, "16:9 (Widescreen)", 2.0, 8, 512, 512, 768, 768, 1024, 1024))
     if got16 != (1928, 1088):
         fails.append(f"16:9/2.0MP/mult 8 -> {got16}, expected (1928, 1088) — floor instead of round")
-    got32 = node.process(1, "3:2 (Photo)", 2.0, 8, 512, 512, 768, 768, 1024, 1024)
+    got32 = size(node.process(1, "3:2 (Photo)", 2.0, 8, 512, 512, 768, 768, 1024, 1024))
     if got32 != (1776, 1184):
         fails.append(f"3:2/2.0MP/mult 8 -> {got32}, expected (1776, 1184) — floor instead of round")
 
     # 6. Regression guard: select != 1 passes manual sizes through unchanged
-    got2 = node.process(2, "1:1 (Square)", 2.0, 8, 640, 360, 768, 768, 1024, 1024)
+    got2 = size(node.process(2, "1:1 (Square)", 2.0, 8, 640, 360, 768, 768, 1024, 1024))
     if got2 != (640, 360):
         fails.append(f"select=2 -> {got2}, expected (640, 360)")
 

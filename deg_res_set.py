@@ -49,6 +49,7 @@ class DeggResSet:
         return int(w), int(h)
 
     def process(self, select, aspect_ratio, megapixels, multiple, w1, h1, w2, h2, w3, h3):
+        select = int(select)
         if select == 1:
             ratio_w, ratio_h = self._parse_aspect(aspect_ratio)
             total_pixels = megapixels * 1_048_576
@@ -57,13 +58,35 @@ class DeggResSet:
             scale = math.sqrt(total_pixels / (ratio_w * ratio_h))
             w = round(scale * ratio_w / multiple) * multiple
             h = round(scale * ratio_h / multiple) * multiple
-            return (w, h)
         elif select == 2:
-            return (w1, h1)
+            w, h = w1, h1
         elif select == 3:
-            return (w2, h2)
+            w, h = w2, h2
         else:
-            return (w3, h3)
+            w, h = w3, h3
+        return self._result(select, w, h)
+
+    @staticmethod
+    def _result(select, w, h):
+        """Report the resolved size twice: as the outputs and in the `ui` channel.
+
+        A widget converted to an input is IGNORED by ComfyUI — the upstream
+        value is passed into `process()` instead, so the widget value is not
+        what the graph uses. The frontend cannot know that value before
+        execution (e.g. GetImageSize computes it from the image and has no
+        widgets at all), so the actual size travels back in `ui`:
+        `executed` -> `node.onExecuted(output)` -> the "W × H ← W × H" row.
+        """
+        w, h = int(w), int(h)
+        return {
+            # ComfyUI's ui channel is ALWAYS a list per key: execution.py
+            # merges batched calls with
+            #   ui = {k: [y for x in uis for y in x[k]] for k in uis[0].keys()}
+            # so a dict value is iterated and degrades to its KEYS
+            # (["select", "w", "h"]). Wrap in a one-element list.
+            "ui": {"degg_res_size": [{"select": int(select), "w": w, "h": h}]},
+            "result": (w, h),
+        }
 
 
 NODE_CLASS_MAPPINGS = {

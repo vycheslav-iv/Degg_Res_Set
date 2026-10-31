@@ -12,10 +12,12 @@
 | Файл | Назначение |
 |------|-----------|
 | `deg_res_set.py` | Python-класс `DeggResSet` — 4 пресета, расчёт ResolutionSelector |
-| `web/js/deg_res_set.js` | LiteGraph-расширение: 4 визуальных сепаратора, дизейбл/активация виджетов, строка превью ResolutionPreview |
+| `web/js/deg_res_set.js` | LiteGraph-расширение: 4 визуальных сепаратора, дизейбл/активация виджетов, строка превью ResolutionPreview + 3 DOM-строки «W × H» для ручных пресетов |
 | `__init__.py` | Экспорт маппингов, `WEB_DIRECTORY` |
 | `tests/_test_preview.py` | Тест превью-строки (канонический тип, serialize×2, позиция, switch, round-паритет, отложенное создание, идемпотентность, `Number(select)`) |
 | `tests/_test_dom_sep.py` | Регрессия DOM-сепараторов |
+| `tests/_smoke_res_set_previews.mjs` | Смоук строк «W × H» пресетов 2-4 (создание/позиция/hide/live/switch/идемпотентность, значение с провода `W × H ← W × H`) |
+| `tests/_test_process_ui.py` | Тест `ui`-канала `process()`: фактический размер (в т.ч. пришедший по проводу) уходит в `executed`/`app.nodeOutputs` |
 
 ## 3. Python: класс DeggResSet
 
@@ -51,6 +53,31 @@
 - `RETURN_TYPES = ("INT", "INT")`
 - `RETURN_NAMES = ("width", "height")`
 - `OUTPUT_NODE = False`
+
+`process()` возвращает **не голый кортеж**, а dict — размер дублируется в
+`ui`-канале, чтобы фронтенд узнал ФАКТИЧЕСКИЙ размер (в т.ч. пришедший по
+проводу, см. §4.5):
+
+```python
+{"ui": {"degg_res_size": [{"select": 2, "w": 1600, "h": 1920}]},
+ "result": (1600, 1920)}
+```
+
+⛔ **Значение `ui` — ОДНОЭЛЕМЕНТНЫЙ СПИСОК, не dict.** `execution.py`
+склеивает ui батчевых вызовов так:
+
+```python
+ui = {k: [y for x in uis for y in x[k]] for k in uis[0].keys()}
+```
+
+Dict-значение итерируется → до клиента доезжает список КЛЮЧЕЙ
+(`"degg_res_size": ["select", "w", "h"]`), т.е. ровно живой симптом
+`512 × 512  ←  …`. Проверено пробой: `POST /prompt` → `/history` показал
+`["select", "w", "h"]`, выходы при этом верные (3240 × 4320). После обёртки в
+список тот же пробник даёт `"degg_res_size": [{"select": 2, "w": 3240, "h": 4320}]`.
+
+ComfyUI отправляет `ui` в событии `executed` → `node.onExecuted(output)` и
+складывает в `app.nodeOutputs` (переживает переключение вкладки/кэш ноды).
 
 ### Логика process()
 
@@ -125,7 +152,7 @@ const { app } = window.comfyAPI?.app;
 - `GROUP_START = [1, 4, 6, 8]` — исходные индексы вставки (до смещения)
 - Вставка в обратном порядке (с конца) для сохранения позиций
 - Высота сепаратора: 22px + 2px margin = 26px
-- Автоматическое увеличение высоты ноды: `+26 * (4 + 1) + 16 = 146px` (4 сепаратора + строка превью)
+- Автоматическое увеличение высоты ноды: `+26 * (4 + 1 + 3) + 16 = 224px` (4 сепаратора + строка превью пресета 1 + 3 строки пресетов 2-4)
 - `makeSepDOM(label)` создаёт `div` с CSS:
   - `height: 22px`, `border-top`, `background: rgba(50,50,50,0.04)`
   - `color: #888`, `font: bold 10px sans-serif`
@@ -298,7 +325,82 @@ function createPreview(node) {
   находит ratio → показывает `—`; при `select == 1` возвращается `aspect_ratio`.
   Переключение живёт в единственной точке (`updateWidgetState`), которую вызывают
   callback select + `onConfigure` + `loadedGraphNode`.
-- **Высота ноды:** строка учитывается в `+26 * (GROUP_START.length + 1) + 16`.
+- **Высота ноды:** строка учитывается в `+26 * (GROUP_START.length + 1 + RES_PREVIEWS.length) + 16`.
+
+### 4.4. Строки «W × H» ручных пресетов 2-4
+
+Под каждой парой `w*`/`h*` (пресеты 2-4) стоит строка, показывающая **ровно то,
+что нода подаёт на выход** в формате `1080 × 1080`. Пресет 1 такую строку уже
+имел (нативный `WidgetResolutionPreview`), но тот **вычисляет** размер только из
+`aspect_ratio` + `megapixels` + `multiple` — произвольные ручные `w/h` показать
+не может. Поэтому для пресетов 2-4 строка сделана DOM-виджетом.
+
+- `RES_PREVIEWS = [{key:"__res_preview_2", w:"w1", h:"h1", preset:2}, ...]`
+  (аналогично 3 и 4) — единая таблица «строка → пара виджетов → номер пресета».
+- `makeResPreviewDOM()` — `div` в стиле нативного ряда: `height:24px` (`h-6`),
+  `display:flex`, `gap:8px`, `padding:0 8px`, `border-radius:6px`, `font:12px`,
+  фон `var(--component-node-widget-background)`, текст
+  `var(--component-node-foreground)`; стартовое значение `—`.
+- `ensurePresetPreviews(node)` — идемпотентна (guard по `node.__deggResPreviews[key]`),
+  создаёт `addDOMWidget(key, "div", el, {serialize:false, hideInPanel:true, ...})`,
+  переносит виджет `splice`-ом **сразу под свой `h`**; вставка идёт в порядке
+  убывания (сначала под `h3`), чтобы индексы `h2`/`h1` не сдвигались.
+- `updatePresetPreviews(node, selectVal)` — активный пресет → `${w} × ${h}`,
+  остальные → `—` (то же поведение, что у строки пресета 1).
+- `hookSizeWidgets(node)` оборачивает `callback` у `w1,h1..w3,h3` (legacy **и**
+  Nodes 2.0 зовут именно `widget.callback`, `node.onWidgetChanged` в новом UI не
+  вызывается) → строка обновляется в момент правки числа.
+- Точка вызова — начало `createPreview(node)` (рядом с нативным рядом, тот же
+  отложенный тик) + `loadedGraphNode`; `updateWidgetState` перерисовывает текст
+  при смене `select`.
+- ⛔ `hideInPanel:true` — строка не попадает в панель свойств.
+- ⛔ **`widget.serialize = false` — СВОЙСТВО виджета**, а не только опция:
+  `serializeWidgetValues()` фильтрует по `w.serialize === false`, поле
+  `options.serialize` он не читает. С одной опцией `""` попадало в
+  `widgets_values` / `widgets_values_named` (нативная строка `preview` задаёт
+  оба — поэтому её там нет).
+- Детектор: `tests/_smoke_res_set_previews.mjs` — красный до фикса (`FAIL: 27`),
+  6 мутаций (нет вызова / вставка до `h` / неверный разделитель / нет hook /
+  сериализация / не гасится `—`) дают RED.
+
+### 4.5. Значение, пришедшее ПО ПРОВОДУ: `W × H  ←  W × H`
+
+Если `w*`/`h*` сконвертирован в input и подключён, ComfyUI **игнорирует виджет**
+и передаёт в `process()` значение из провода. Показывать только виджет — ложь
+(«512 × 512» при фактических 1600 × 1920). Фронтенд не может узнать это значение
+до прогона: типовой источник (`GetImageSize`, core) вообще не имеет виджетов —
+он считает размер из картинки и отдаёт его в `progress_text` + выходы INT.
+
+Поэтому:
+
+- `process()` кладёт фактический размер в `ui` (§3 OUTPUT) — это значение уже
+  после подстановки провода, т.е. ровно то, что уйдёт в граф.
+- `nodeType.prototype.onExecuted(output)` (обёртка с сохранением оригинала)
+  читает `output.degg_res_size` (**список** → `[0]`, см. §3 OUTPUT) →
+  `node.__deggResLast = {select, w, h}` →
+  перерисовка строк.
+- `lastResolvedSize(node)` — сначала `__deggResLast`, иначе `app.nodeOutputs`
+  (восстановленные выходы при загрузке воркфлоу / кэше ноды); ключ пробуется и
+  числом, и строкой (`app.nodeOutputs[node.id] ?? app.nodeOutputs[String(node.id)]`).
+- `isInputWired(node, name)` — `node.inputs` содержит запись с живым `link`
+  (виджет, сконвертированный в input, появляется в `node.inputs`).
+- `onConnectionsChange` (обёртка) перерисовывает строки: подключение/отключение
+  провода меняет то, что реально использует сервер.
+- Формат строки: без провода — `512 × 512`; с проводом и известным размером —
+  `512 × 512  ←  1600 × 1920`; с проводом до прогона — `512 × 512  ←  …`.
+- Размер привязан к номеру пресета (`last.select === spec.preset`): прогон
+  пресета 3 не подставляет 2048 × 2048 в строку пресета 2 (там снова `…`).
+- ⚠️ Пресет 1 (нативная строка) по-прежнему считает из виджетов
+  `aspect_ratio`/`megapixels`/`multiple` — если их подключить проводом, нативная
+  строка покажет расчёт по значениям виджетов, а не по проводу.
+- Детекторы: `tests/_test_process_ui.py` (красный до фикса `FAIL: 12`;
+  п.4b симулирует merge из `execution.py` — dict-значение даёт `FAIL: 4`) и
+  `tests/_smoke_res_set_previews.mjs` (красный до фикса `FAIL: 10`);
+  12 мутаций, все RED: P1-P3 (`result` списком / `select` захардкожен / нет `ui`),
+  P4 (`ui` без list-обёртки → `FAIL: 4`), J1 (`normalizeSize` не разворачивает
+  список → `FAIL: 3`), M1-M7 (нет `widget.serialize` / `isInputWired` всегда false /
+  игнор номера пресета / `onExecuted` не сохраняет / нет фолбэка `app.nodeOutputs` /
+  нет правой части / нет `onConnectionsChange`).
 
 ## 5. Категория
 
