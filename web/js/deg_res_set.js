@@ -12,16 +12,36 @@ const SEP_LABELS = [
 // Original (pre-insertion) indices for each separator
 const GROUP_START = [1, 4, 6, 8];
 
+// Height of every DOM row we insert. Two places must agree on it:
+//   * the addDOMWidget OPTIONS (`getMinHeight`/`getMaxHeight`) — arrange()
+//     computes `widget.y` from it, and input sockets are placed at
+//     `widget.y + NODE_SLOT_HEIGHT/2`;
+//   * the element's own box in the Vue grid — the row there is `auto`, i.e.
+//     sized by the content, so the element must be exactly this tall.
+// 24 is not arbitrary: it is what the frontend gives a NATIVE widget row
+// (`NODE_WIDGET_HEIGHT` 20 + 4), so our rows advance the chain by the same
+// amount native rows do and sockets land on their rows.
+const DOM_ROW_H = 24;
+
+const ROW_LAYOUT_OPTS = {
+  getMinHeight: () => DOM_ROW_H,
+  getMaxHeight: () => DOM_ROW_H,
+};
+
 function makeSepDOM(label) {
   const el = document.createElement("div");
   el.className = "degg-res-sep";
   el.style.cssText = [
     "box-sizing:border-box",
-    "height:22px",
+    `height:${DOM_ROW_H}px`,
+    // The Vue wrapper around a DOM widget is `flex flex-col *:flex-1`; its
+    // `flex:1 1 0%` would override `height` and squeeze the row (measured:
+    // 13px instead of 24). Inline `flex:none` wins over that class rule.
+    "flex:0 0 auto",
     "display:flex",
     "align-items:center",
     "padding:0 8px",
-    "margin:2px 0",
+    "margin:0",
     "border-top:1px solid rgba(120,120,120,0.25)",
     "background:rgba(50,50,50,0.04)",
     "color:#888",
@@ -84,19 +104,111 @@ function lastResolvedSize(node) {
   return normalizeSize(out?.degg_res_size);
 }
 
+/** Namespace-safe API client (comfyAPI.api is the MODULE, client is .api). */
+function pickApi() {
+  try {
+    if (window.comfyAPI?.api?.api) return window.comfyAPI.api.api;
+    if (window.comfyAPI?.api?.apiURL) return window.comfyAPI.api;
+    if (window.api) return window.api;
+  } catch (_) {}
+  return null;
+}
+
+/** Re-run the node layout once the DOM rows are mounted.
+ *
+ * `arrange()` recomputes `widget.y` (from computeLayoutSize) and then places
+ * the input sockets at those y's. On workflow load the first arrange happens
+ * BEFORE the DOM rows are measured, so the sockets keep a stale y until the
+ * next layout — that is the "circles above their rows after a page refresh"
+ * symptom (connecting a wire re-runs the layout and "heals" it).
+ */
+function arrangeSoon(node) {
+  setTimeout(() => {
+    try {
+      if (node.graph && typeof node.arrange === "function") node.arrange();
+    } catch (_) {}
+    try {
+      node.setDirtyCanvas?.(true, true);
+    } catch (_) {}
+  }, 0);
+}
+
+const HISTORY_MAX = 10;
+const HISTORY_BUSY = new Set();
+
+function historyQueueNumber(rec) {
+  const p = rec && rec.prompt;
+  if (Array.isArray(p) && Number.isFinite(Number(p[0]))) return Number(p[0]);
+  return 0;
+}
+
+/** After a page reload the frontend has NO node outputs (changeTracker lives
+ * in memory), so a wired w/h would show the widget value while the server
+ * actually takes the size from the wire. Catch up from /history — same idea
+ * as the background-run catch-up pattern: newest record that carries our ui
+ * payload for THIS node id wins.
+ */
+function catchUpSizeFromHistory(node) {
+  if (!node || node.__deggResLast || HISTORY_BUSY.has(node.id)) return;
+  const a = pickApi();
+  if (!a || typeof a.fetchApi !== "function") return;
+  let req;
+  HISTORY_BUSY.add(node.id);
+  try {
+    req = a.fetchApi(`/history?max_items=${HISTORY_MAX}`);
+  } catch (_) {
+    HISTORY_BUSY.delete(node.id);
+    return;
+  }
+  Promise.resolve(req)
+    .then((r) => (r && r.ok ? r.json() : null))
+    .then((json) => {
+      if (!json) return;
+      const hist = json.History || json;
+      const recs = Object.keys(hist)
+        .map((k) => hist[k])
+        .filter((r) => r && r.outputs);
+      recs.sort((x, y) => historyQueueNumber(y) - historyQueueNumber(x));
+      for (const rec of recs) {
+        const size = normalizeSize(rec.outputs?.[String(node.id)]?.degg_res_size);
+        if (!size) continue;
+        if (!node.__deggResLast) {
+          node.__deggResLast = size;
+          updatePresetPreviews(node, getWidget(node, "select")?.value);
+        }
+        return; // только самая свежая запись с выходом этой ноды
+      }
+    })
+    .catch(() => {})
+    .finally(() => HISTORY_BUSY.delete(node.id));
+}
+
+/** Run `fn` for every DeggResSet node in the active graph. */
+function eachResNode(fn) {
+  try {
+    const list = app?.graph?._nodes || app?.graph?.nodes || [];
+    for (const n of list) {
+      if (!n) continue;
+      if ((n.comfyClass || n.type) !== "DeggResSet") continue;
+      fn(n);
+    }
+  } catch (_) {}
+}
+
 function makeResPreviewDOM() {
   const el = document.createElement("div");
   el.className = "degg-res-preview";
   // Same look as the native WidgetResolutionPreview row (h-6 / 12px / themed).
   el.style.cssText = [
     "box-sizing:border-box",
-    "height:24px",
+    `height:${DOM_ROW_H}px`,
+    "flex:0 0 auto",
     "display:flex",
     "align-items:center",
     "justify-content:center",
     "gap:8px",
     "padding:0 8px",
-    "margin:1px 0",
+    "margin:0",
     "border-radius:6px",
     "background:var(--component-node-widget-background, rgba(128,128,128,0.12))",
     "color:var(--component-node-foreground, #ddd)",
@@ -129,17 +241,17 @@ function updatePresetPreviews(node, selectVal) {
       el.textContent = "—";
       continue;
     }
-    // A wired input overrides the widget on the server, so the widget pair
-    // alone is a lie: show the size that really goes downstream next to it.
-    // Before the first run that value does not exist anywhere (the source may
-    // compute it at run time) -> "…" until `executed` brings it.
-    if (!isInputWired(node, spec.w) && !isInputWired(node, spec.h)) {
-      el.textContent = `${wv} × ${hv}`;
-      continue;
-    }
-    const resolved =
-      last && last.select === spec.preset ? `${last.w} × ${last.h}` : "…";
-    el.textContent = `${wv} × ${hv}  ←  ${resolved}`;
+    // One number only: a wired input overrides the widget on the server, so as
+    // soon as the real size is known (`executed` brought it for THIS preset) it
+    // REPLACES the widget value — no "←" and no substitution display.
+    // Before the first run that value exists nowhere (the source may compute it
+    // at run time), so the widget pair is the only thing we can honestly show.
+    // Without a wire the widget IS the truth (the server uses it), so a fresh
+    // widget edit must show immediately — only a wired input needs the run's
+    // real size, and only for the preset that actually ran.
+    const wired = isInputWired(node, spec.w) || isInputWired(node, spec.h);
+    const known = wired && last && last.select === spec.preset ? last : null;
+    el.textContent = known ? `${known.w} × ${known.h}` : `${wv} × ${hv}`;
   }
 }
 
@@ -172,6 +284,7 @@ function ensurePresetPreviews(node) {
       hideInPanel: true,
       getValue: () => null,
       setValue: () => {},
+      ...ROW_LAYOUT_OPTS,
     });
 
     // addDOMWidget returns the widget on current frontends; older ones only
@@ -195,6 +308,9 @@ function ensurePresetPreviews(node) {
 
   hookSizeWidgets(node);
   updatePresetPreviews(node, getWidget(node, "select")?.value);
+  // The rows exist now; re-run the layout so sockets sit on their rows even
+  // when the first arrange happened before the DOM rows were mounted.
+  arrangeSoon(node);
 }
 
 // ── Widget helpers ──
@@ -327,6 +443,7 @@ app.registerExtension({
           hideInPanel: true,
           getValue: () => null,
           setValue: () => {},
+          ...ROW_LAYOUT_OPTS,
         });
         // Move the DOM widget to the correct position
         const sepWidget = this.widgets[this.widgets.length - 1];
@@ -334,11 +451,11 @@ app.registerExtension({
         this.widgets.splice(idx, 0, sepWidget);
       }
 
-      // Adjust node height for extra separators (22px each + margins),
-      // the native preview row, and the 3 manual-preset preview rows.
+      // Adjust node height for the extra rows: DOM separators, the native
+      // preview row, and the 3 manual-preset preview rows — DOM_ROW_H each.
       this.setSize([
         this.size[0],
-        this.size[1] + 26 * (GROUP_START.length + 1 + RES_PREVIEWS.length) + 16,
+        this.size[1] + DOM_ROW_H * (GROUP_START.length + 1 + RES_PREVIEWS.length) + 16,
       ]);
 
       // ── ResolutionPreview row: deferred (see createPreview above) ──
@@ -409,5 +526,21 @@ app.registerExtension({
     createPreview(node);
     const selectWidget = getWidget(node, "select");
     if (selectWidget) updateWidgetState(node, selectWidget.value);
+    // Fresh page load: outputs are gone, so a wired size must come from /history.
+    catchUpSizeFromHistory(node);
+  },
+
+  /** Tab switch back: ChangeTracker.restore re-populates app.nodeOutputs. */
+  onNodeOutputsUpdated() {
+    eachResNode((n) => updatePresetPreviews(n, getWidget(n, "select")?.value));
+  },
+
+  /** Socket reconnected after a drop: `executed` sent while offline is lost. */
+  setup() {
+    const a = pickApi();
+    if (!a || typeof a.addEventListener !== "function") return;
+    a.addEventListener("reconnected", () => {
+      eachResNode((n) => catchUpSizeFromHistory(n));
+    });
   },
 });

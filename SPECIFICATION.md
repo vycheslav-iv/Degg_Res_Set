@@ -16,7 +16,7 @@
 | `__init__.py` | Экспорт маппингов, `WEB_DIRECTORY` |
 | `tests/_test_preview.py` | Тест превью-строки (канонический тип, serialize×2, позиция, switch, round-паритет, отложенное создание, идемпотентность, `Number(select)`) |
 | `tests/_test_dom_sep.py` | Регрессия DOM-сепараторов |
-| `tests/_smoke_res_set_previews.mjs` | Смоук строк «W × H» пресетов 2-4 (создание/позиция/hide/live/switch/идемпотентность, значение с провода `W × H ← W × H`) |
+| `tests/_smoke_res_set_previews.mjs` | Смоук строк «W × H» пресетов 2-4 (создание/позиция/hide/live/switch/идемпотентность, фактический размер с провода) |
 | `tests/_test_process_ui.py` | Тест `ui`-канала `process()`: фактический размер (в т.ч. пришедший по проводу) уходит в `executed`/`app.nodeOutputs` |
 
 ## 3. Python: класс DeggResSet
@@ -72,7 +72,7 @@ ui = {k: [y for x in uis for y in x[k]] for k in uis[0].keys()}
 
 Dict-значение итерируется → до клиента доезжает список КЛЮЧЕЙ
 (`"degg_res_size": ["select", "w", "h"]`), т.е. ровно живой симптом
-`512 × 512  ←  …`. Проверено пробой: `POST /prompt` → `/history` показал
+`512 × 512` без изменений до прогона. Проверено пробой: `POST /prompt` → `/history` показал
 `["select", "w", "h"]`, выходы при этом верные (3240 × 4320). После обёртки в
 список тот же пробник даёт `"degg_res_size": [{"select": 2, "w": 3240, "h": 4320}]`.
 
@@ -325,7 +325,7 @@ function createPreview(node) {
   находит ratio → показывает `—`; при `select == 1` возвращается `aspect_ratio`.
   Переключение живёт в единственной точке (`updateWidgetState`), которую вызывают
   callback select + `onConfigure` + `loadedGraphNode`.
-- **Высота ноды:** строка учитывается в `+26 * (GROUP_START.length + 1 + RES_PREVIEWS.length) + 16`.
+- **Высота ноды:** строка учитывается в `+24 * (GROUP_START.length + 1 + RES_PREVIEWS.length) + 16`.
 
 ### 4.4. Строки «W × H» ручных пресетов 2-4
 
@@ -363,7 +363,7 @@ function createPreview(node) {
   6 мутаций (нет вызова / вставка до `h` / неверный разделитель / нет hook /
   сериализация / не гасится `—`) дают RED.
 
-### 4.5. Значение, пришедшее ПО ПРОВОДУ: `W × H  ←  W × H`
+### 4.5. Значение, пришедшее ПО ПРОВОДУ: одна цифра — фактический размер
 
 Если `w*`/`h*` сконвертирован в input и подключён, ComfyUI **игнорирует виджет**
 и передаёт в `process()` значение из провода. Показывать только виджет — ложь
@@ -382,25 +382,69 @@ function createPreview(node) {
 - `lastResolvedSize(node)` — сначала `__deggResLast`, иначе `app.nodeOutputs`
   (восстановленные выходы при загрузке воркфлоу / кэше ноды); ключ пробуется и
   числом, и строкой (`app.nodeOutputs[node.id] ?? app.nodeOutputs[String(node.id)]`).
+- ⭐ **После F5 `app.nodeOutputs` пуст** (changeTracker живёт в памяти), поэтому
+  размер с провода догоняется из `/history?max_items=10`: самая свежая запись
+  (по `prompt[0]`, номер в очереди) с `outputs[nodeId].degg_res_size` для ЭТОЙ
+  ноды → `__deggResLast` → перерисовка. Запрос один раз на ноду
+  (`HISTORY_BUSY`), не затирает уже известное значение. Триггеры: `loadedGraphNode`
+  (открыли воркфлоу после перезагрузки) и `reconnected` (обрыв связи, `executed`
+  потерян). `onNodeOutputsUpdated()` (возврат на вкладку —
+  `ChangeTracker.restore → app.nodeOutputs`) перерисовывает строки активного графа.
 - `isInputWired(node, name)` — `node.inputs` содержит запись с живым `link`
   (виджет, сконвертированный в input, появляется в `node.inputs`).
 - `onConnectionsChange` (обёртка) перерисовывает строки: подключение/отключение
   провода меняет то, что реально использует сервер.
-- Формат строки: без провода — `512 × 512`; с проводом и известным размером —
-  `512 × 512  ←  1600 × 1920`; с проводом до прогона — `512 × 512  ←  …`.
+- Формат строки — ОДНО число, без «←» и без замещения виджетом:
+  - без провода — значение виджета (`512 × 512`), правка видна сразу (сервер
+    всё равно берёт виджет, ждать прогона нечего);
+  - с проводом и известным размером — ТОЛЬКО фактический (`1600 × 1920`);
+  - с проводом до первого прогона реального размера нет ни у кого → значение
+    виджета (`512 × 512`), затем его заменяет фактический.
 - Размер привязан к номеру пресета (`last.select === spec.preset`): прогон
-  пресета 3 не подставляет 2048 × 2048 в строку пресета 2 (там снова `…`).
+  пресета 3 не подставляет 2048 × 2048 в строку пресета 2 (там снова значение
+  виджета).
 - ⚠️ Пресет 1 (нативная строка) по-прежнему считает из виджетов
   `aspect_ratio`/`megapixels`/`multiple` — если их подключить проводом, нативная
   строка покажет расчёт по значениям виджетов, а не по проводу.
 - Детекторы: `tests/_test_process_ui.py` (красный до фикса `FAIL: 12`;
   п.4b симулирует merge из `execution.py` — dict-значение даёт `FAIL: 4`) и
-  `tests/_smoke_res_set_previews.mjs` (красный до фикса `FAIL: 10`);
-  12 мутаций, все RED: P1-P3 (`result` списком / `select` захардкожен / нет `ui`),
+  `tests/_smoke_res_set_previews.mjs` (красный до фикса `FAIL: 10`; после
+  задач «одно число» + «раскладка/догон истории» — `FAIL: 7` и `FAIL: 18`);
+  19 мутаций, все RED: P1-P3 (`result` списком / `select` захардкожен / нет `ui`),
   P4 (`ui` без list-обёртки → `FAIL: 4`), J1 (`normalizeSize` не разворачивает
   список → `FAIL: 3`), M1-M7 (нет `widget.serialize` / `isInputWired` всегда false /
   игнор номера пресета / `onExecuted` не сохраняет / нет фолбэка `app.nodeOutputs` /
-  нет правой части / нет `onConnectionsChange`).
+  нет правой части / нет `onConnectionsChange`), M8-M14 (нет `ROW_LAYOUT_OPTS`
+  у строк превью → `FAIL: 6` и у сепараторов → `FAIL: 8` / нет `arrangeSoon` →
+  `FAIL: 2` / catch-up отключён → `FAIL: 1` / история в обратном порядке →
+  `FAIL: 1` / нет `onNodeOutputsUpdated` → `FAIL: 1` / `arrangeSoon` без
+  `arrange()` → `FAIL: 2`).
+
+### 4.6. Раскладка: высота DOM-строк — в ОПЦИЯХ `addDOMWidget`
+
+Симптом: после обновления страницы кружки сокетов `w1`/`h1` нарисованы **выше**
+своих строк (около сепаратора «PRESET 2»), а отключение/подключение провода
+«лечит» — раскладка пересчитывается.
+
+Механика (исходники фронтенда 1.57.6, `nodeDefStore-*.js`):
+
+- `_arrangeWidgets` ставит `widget.y` последовательно, высоту берёт из
+  `computeSize()` → `computeLayoutSize()` → иначе `NODE_WIDGET_HEIGHT+4`;
+- у DOM-виджета `computeLayoutSize()` = `minHeight: options.getMinHeight?.() ?? 50`
+  — **без `getMinHeight` каждый наш ряд считается 50px**, хотя CSS у него 26px;
+- `_arrangeWidgetInputSlots` ставит сокет в `widget.y + NODE_SLOT_HEIGHT/2`, т.е.
+  сокеты наследуют ошибку `widget.y`;
+- `arrange()` вызывается, пока `_widgetSlotsDirty` (ставится `addWidget`), и до
+  монтирования DOM; после монтирования повторного пересчёта нет — ошибка живёт
+  до следующего изменения связей.
+
+Лечение: `getMinHeight`/`getMaxHeight` = `DOM_ROW_H` (26) **в опциях**
+`addDOMWidget` (и у сепараторов, и у строк превью) + `arrangeSoon(node)` —
+`setTimeout(…, 0)` с `node.arrange()` (и `setDirtyCanvas(true, true)`) после
+создания строк; вызывается из `ensurePresetPreviews`, т.е. и на создании ноды,
+и из `loadedGraphNode`. `arrange()` обёрнут в `if (node.graph)`: вне графа он
+бросает `NullGraphError`.
+
 
 ## 5. Категория
 

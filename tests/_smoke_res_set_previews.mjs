@@ -13,12 +13,17 @@
 //   • правка w/h живым callback'ом обновляет строку;
 //   • смена select переключает, какая строка живая;
 //   • повторный вызов (loadedGraphNode) не дублирует строки;
-//   • ⭐ подключённый w/h (сконвертирован в input) показывает И виджет,
-//     И фактический размер с провода: `640 × 480  ←  1600 × 1920`.
-//     Источник фактического размера — ui-канал своей же ноды
+//   • ⭐ подключённый w/h (сконвертирован в input) показывает ОДНО число —
+//     фактический размер с провода: `1600 × 1920` (никаких «←» и замещения).
+//     Источник — ui-канал своей же ноды
 //     (`{"ui": {"degg_res_size": [{select, w, h}]}}` -> node.onExecuted;
 //     значение — СПИСОК, execution.py склеивает ui по ключам),
-//     до прогона — `…`, после загрузки воркфлоу — из app.nodeOutputs.
+//     до прогона — значение виджета; после загрузки воркфлоу / F5 — из
+//     app.nodeOutputs, а если outputs потеряны — из /history;
+//   • ⭐ высота каждой DOM-строки объявлена в ОПЦИЯХ addDOMWidget
+//     (getMinHeight/getMaxHeight = 26): иначе arrange() считает widget.y по
+//     дефолтным 50px, и сокеты w1/h1 рисуются не на своих строках до первого
+//     переподключения провода.
 //
 // Запуск:  cd Degg_Res_Set && node tests/_smoke_res_set_previews.mjs
 import fs from "node:fs";
@@ -40,6 +45,15 @@ const appInstance = {
     capturedExt = e;
   },
   nodeOutputs: {},
+  graph: { _nodes: [] },
+};
+
+// Заглушка /history: после F5 фронтенд outputs НЕ восстанавливает
+// (changeTracker живёт только в памяти), поэтому реальный размер с провода
+// догоняется запросом истории — как в comfyui-background-run-catchup.
+let historyPayload = {};
+const apiStub = {
+  fetchApi: () => Promise.resolve({ ok: true, json: () => Promise.resolve(historyPayload) }),
 };
 
 function fakeEl() {
@@ -61,7 +75,7 @@ const sandbox = {
     return timers.length;
   },
   clearTimeout: () => {},
-  comfyAPI: { app: { app: appInstance } },
+  comfyAPI: { app: { app: appInstance }, api: { api: apiStub } },
 };
 sandbox.globalThis = sandbox;
 sandbox.window = sandbox;
@@ -117,6 +131,12 @@ function makeNode() {
   node.setSize = function (s) {
     this.size = s;
   };
+  node.graph = { setDirtyCanvas() {} };
+  node.__arrangeCalls = 0;
+  node.arrange = function () {
+    this.__arrangeCalls++;
+  };
+  node.setDirtyCanvas = function () {};
   return node;
 }
 
@@ -191,22 +211,28 @@ const exec = (payload) => {
 
 // ── 5. Значение, приходящее ПО ПРОВОДУ (w1/h1 сконвертированы в input) ────
 // При подключённом входе сервер игнорирует виджет и берёт значение из провода,
-// поэтому одна цифра виджета — ложь. Строка показывает оба значения:
-// `640 × 480  ←  1600 × 1920` (слева — виджет, справа — фактический размер).
+// поэтому строка показывает ОДНО число — фактический размер, как только он
+// известен (никаких «←» и замещения виджетом). До первого прогона реального
+// размера нет ни у кого (источник может считать его на ходу) -> значение виджета.
 fire("select", 2);
 node.inputs = [{ name: "w1", type: "INT", link: 560 }];
 fire("w1", 640); // живая перерисовка (реальный вызов идёт через select/hook)
 check(
-  "подключён w1, прогона ещё не было -> 640 × 480  ←  …",
-  text("__res_preview_2") === "640 × 480  ←  …",
+  "подключён w1, прогона ещё не было -> значение виджета 640 × 480",
+  text("__res_preview_2") === "640 × 480",
+  text("__res_preview_2")
+);
+check(
+  "в строке нет «←» (замещения виджетом не показываем)",
+  !text("__res_preview_2").includes("←"),
   text("__res_preview_2")
 );
 
 // Сервер отдаёт фактический размер в ui-канале (executed -> node.onExecuted)
 exec({ degg_res_size: [{ select: 2, w: 1600, h: 1920 }] });
 check(
-  "после прогона -> 640 × 480  ←  1600 × 1920",
-  text("__res_preview_2") === "640 × 480  ←  1600 × 1920",
+  "после прогона -> только фактический 1600 × 1920",
+  text("__res_preview_2") === "1600 × 1920",
   text("__res_preview_2")
 );
 
@@ -220,16 +246,16 @@ check(
 check("select=3: пресет 2 = —", text("__res_preview_2") === "—");
 fire("select", 2);
 check(
-  "возврат на пресет 2 сохраняет размер с провода",
-  text("__res_preview_2") === "640 × 480  ←  1600 × 1920",
+  "возврат на пресет 2 сохраняет фактический размер",
+  text("__res_preview_2") === "1600 × 1920",
   text("__res_preview_2")
 );
 
 // Прогон другого пресета не подставляет его размер в строку пресета 2
 exec({ degg_res_size: [{ select: 3, w: 2048, h: 2048 }] });
 check(
-  "прогон другого пресета -> 640 × 480  ←  …",
-  text("__res_preview_2") === "640 × 480  ←  …",
+  "прогон другого пресета -> снова значение виджета 640 × 480",
+  text("__res_preview_2") === "640 × 480",
   text("__res_preview_2")
 );
 
@@ -240,7 +266,7 @@ capturedExt.loadedGraphNode(node);
 while (timers.length) timers.shift()();
 check(
   "app.nodeOutputs: восстановленный размер 1111 × 2222",
-  text("__res_preview_2") === "640 × 480  ←  1111 × 2222",
+  text("__res_preview_2") === "1111 × 2222",
   text("__res_preview_2")
 );
 delete appInstance.nodeOutputs[node.id];
@@ -251,25 +277,162 @@ node.inputs = [];
 fire("w1", 640);
 check("провод снят -> 640 × 480", text("__res_preview_2") === "640 × 480", text("__res_preview_2"));
 
-// Живое подключение провода (без правки виджетов) перерисовывает строку
+// Без провода виджет — истина: правка после прогона видна СРАЗУ (не ждёт прогона)
+exec({ degg_res_size: [{ select: 2, w: 1600, h: 1920 }] });
+fire("w1", 900);
+check(
+  "без провода правка виджета видна сразу (900 × 480), а не размер прогона",
+  text("__res_preview_2") === "900 × 480",
+  text("__res_preview_2")
+);
+fire("w1", 640);
+
+// Живое подключение провода (без правки виджетов) перерисовывает строку.
+// Строка до этого — 640 × 480 (виджет), значит перерисовка обязана её сменить.
+node.__deggResLast = { select: 2, w: 1600, h: 1920 };
 node.inputs = [{ name: "h1", type: "INT", link: 561 }];
 if (typeof node.onConnectionsChange !== "function") {
   errors.push("у ноды нет onConnectionsChange — подключение провода не обновит строку");
 } else {
   node.onConnectionsChange(1, 1, true);
   check(
-    "onConnectionsChange -> 640 × 480  ←  …",
-    text("__res_preview_2") === "640 × 480  ←  …",
+    "onConnectionsChange (подключение) -> фактический 1600 × 1920",
+    text("__res_preview_2") === "1600 × 1920",
     text("__res_preview_2")
   );
   node.inputs = [];
   node.onConnectionsChange(1, 1, false);
   check(
-    "onConnectionsChange (отключение) -> 640 × 480",
+    "onConnectionsChange (отключение) -> виджет 640 × 480",
     text("__res_preview_2") === "640 × 480",
     text("__res_preview_2")
   );
 }
+node.__deggResLast = null;
+
+// ── 5c. Раскладка: высота DOM-строк = высоте нативной строки виджета ─────
+// Симптом: кружки сокетов w1/h1 нарисованы ВЫШЕ своих строк, провод кончается
+// над строкой; расхождение растёт с числом строк. Причина (замер живого DOM,
+// user/degg_probe.json): сокет ставится в `widget.y + NODE_SLOT_HEIGHT/2`, где
+// widget.y посчитан arrange() по computedHeight, а строка в Vue-сетке получает
+// СВОЮ высоту. У нативного виджета обе величины равны 24 (NODE_WIDGET_HEIGHT 20
+// + 4), поэтому у нативных строк расхождения нет. Наши строки объявляли 26, а
+// в сетке сжимались до 13–15px: обёртка WidgetDOM — `flex flex-col *:flex-1`,
+// её `flex:1 1 0%` перебивает height из cssText. Итог: цепочка widget.y (26 на
+// строку) и сетка (17.4 на строку) расходятся, сокеты уезжают вверх.
+// Контракт: DOM_ROW_H === 24 (как у нативной строки) + элемент не сжимается.
+const DOM_ROW_H = 24;
+for (const key of [
+  "__grp_0",
+  "__grp_1",
+  "__grp_2",
+  "__grp_3",
+  "__res_preview_2",
+  "__res_preview_3",
+  "__res_preview_4",
+]) {
+  const o = byName(node, key)?.options;
+  check(
+    `${key}: getMinHeight=${DOM_ROW_H} в опциях`,
+    typeof o?.getMinHeight === "function" && o.getMinHeight() === DOM_ROW_H,
+    o?.getMinHeight ? String(o.getMinHeight()) : "нет"
+  );
+  check(
+    `${key}: getMaxHeight=${DOM_ROW_H} в опциях`,
+    typeof o?.getMaxHeight === "function" && o.getMaxHeight() === DOM_ROW_H,
+    o?.getMaxHeight ? String(o.getMaxHeight()) : "нет"
+  );
+}
+check(
+  "после создания строк вызван arrange (пересчёт widget.y -> pos сокетов)",
+  node.__arrangeCalls > 0,
+  String(node.__arrangeCalls)
+);
+
+// Элемент обязан противостоять обёртке `flex flex-col *:flex-1` (иначе
+// height из cssText игнорируется и строка в сетке ниже, чем в widget.y).
+for (const key of [
+  "__grp_0",
+  "__grp_1",
+  "__grp_2",
+  "__grp_3",
+  "__res_preview_2",
+  "__res_preview_3",
+  "__res_preview_4",
+]) {
+  const css = String(byName(node, key)?.element?.style?.cssText || "");
+  check(
+    `${key}: элемент не сжимается flex-обёрткой (flex:0 0 auto)`,
+    /flex:0 0 auto/.test(css),
+    css.slice(0, 90)
+  );
+  check(
+    `${key}: height=${DOM_ROW_H}px без вертикальных margin`,
+    new RegExp(`(^|;)height:${DOM_ROW_H}px(;|$)`).test(css) && !/margin:(?!0(;|$))/.test(css),
+    css.slice(0, 90)
+  );
+}
+
+check(
+  "высота ноды выросла ровно на 24px на строку (+16)",
+  node.size[1] - 700 === DOM_ROW_H * (4 + 1 + 3) + 16,
+  `${node.size[1]}`
+);
+
+// ── 5d. После F5 фактический размер догоняется из /history ────────────────
+// Фронтенд outputs после перезагрузки НЕ восстанавливает (changeTracker живёт
+// в памяти), поэтому без запроса истории строка показывает значение виджета,
+// хотя сервер берёт размер с провода.
+historyPayload = {
+  p1: { prompt: [1], outputs: { [String(node.id)]: { degg_res_size: [{ select: 2, w: 1080, h: 1440 }] } } },
+  p2: { prompt: [2], outputs: { [String(node.id)]: { degg_res_size: [{ select: 2, w: 2048, h: 2731 }] } } },
+};
+node.inputs = [{ name: "w1", type: "INT", link: 560 }];
+node.__deggResLast = null;
+capturedExt.loadedGraphNode(node);
+while (timers.length) timers.shift()();
+await new Promise((r) => setImmediate(r));
+check(
+  "после F5 (провод) -> фактический из /history, самая свежая запись 2048 × 2731",
+  text("__res_preview_2") === "2048 × 2731",
+  text("__res_preview_2")
+);
+node.inputs = [];
+fire("w1", 640);
+check(
+  "без провода история не подменяет виджет (640 × 480)",
+  text("__res_preview_2") === "640 × 480",
+  text("__res_preview_2")
+);
+
+// ── 5e. Возврат на вкладку: ChangeTracker.restore -> app.nodeOutputs ─────
+node.inputs = [{ name: "w1", type: "INT", link: 560 }];
+node.__deggResLast = null;
+appInstance.nodeOutputs[node.id] = { degg_res_size: [{ select: 2, w: 1111, h: 2222 }] };
+appInstance.graph._nodes = [node];
+if (typeof capturedExt.onNodeOutputsUpdated !== "function") {
+  errors.push("нет onNodeOutputsUpdated — возврат на вкладку не обновит строку");
+} else {
+  capturedExt.onNodeOutputsUpdated(appInstance.nodeOutputs);
+  check(
+    "onNodeOutputsUpdated -> 1111 × 2222",
+    text("__res_preview_2") === "1111 × 2222",
+    text("__res_preview_2")
+  );
+}
+delete appInstance.nodeOutputs[node.id];
+appInstance.graph._nodes = [];
+historyPayload = {};
+
+// ── 5f. Загрузка воркфлоу: после loadedGraphNode раскладка пересчитана ────
+node.__arrangeCalls = 0;
+capturedExt.loadedGraphNode(node);
+while (timers.length) timers.shift()();
+check(
+  "loadedGraphNode -> arrange (сокеты встают на свои строки)",
+  node.__arrangeCalls > 0,
+  String(node.__arrangeCalls)
+);
 
 // ── 6. Повторный вызов (loadedGraphNode) не дублирует строки ─────────────
 capturedExt.loadedGraphNode(node);
